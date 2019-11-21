@@ -7,20 +7,20 @@ import csv
 import logging
 from pprint import pprint
 from collections import Counter
+from gevent.pool import Pool
+
+from gevent import monkey
+
+# Make the standard library cooperative.
+monkey.patch_all()
 
 import requests
 import matplotlib.pyplot as plt
 import jieba
 import pymysql
-from gevent import monkey
-from gevent.pool import Pool
 from queue import Queue
 from bs4 import BeautifulSoup
 from wordcloud import WordCloud
-
-
-# Make the standard library cooperative.
-monkey.patch_all()
 
 
 def get_logger():
@@ -40,18 +40,31 @@ def get_logger():
 HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36"
-    "(KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36",
+                  "(KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36",
 }
 
 START_URL = (
-    "http://search.51job.com/list/010000%252C020000%252C030200%252C040000"
-    ",000000,0000,00,9,99,Python,2,{}.html? lang=c&stype=1&postchannel=00"
-    "00&workyear=99&cotype=99&degreefrom=99&jobterm=99&companysize=99&lon"
-    "lat=0%2C0&radius=-1&ord_field=0&confirmdate=9&fromType=1&dibiaoid=0&"
-    "address=&line=&specialarea=00&from=&welfare="
+    # "http://search.51job.com/list/010000%252C020000%252C030200%252C040000"
+    # ",000000,0000,00,9,99,Python,2,{}.html? lang=c&stype=1&postchannel=00"
+    # "00&workyear=99&cotype=99&degreefrom=99&jobterm=99&companysize=99&lon"
+    # "lat=0%2C0&radius=-1&ord_field=0&confirmdate=9&fromType=1&dibiaoid=0&"
+    # "address=&line=&specialarea=00&from=&welfare="
+
+    # # c++ 南京
+    # "https://search.51job.com/list/070200,000000,0000,00,9,99,C%252B%252B,2,{}.html"
+    # "?lang=c&stype=&postchannel=0000"
+    # "&workyear=99&cotype=99&degreefrom=99&jobterm=99&companysize=99"
+    # "&providesalary=99&lonlat=0%2C0&radius=-1&ord_field=0&confirmdate=9"
+    # "&fromType=&dibiaoid=0&address=&line=&specialarea=00&from=&welfare="
+
+    # C++ 南京 1.5W+
+    "https://search.51job.com/list/070200,000000,0000,00,9,99,C%252B%252B,2,{}.html"
+    "?lang=c&stype=&postchannel=0000&workyear=99&cotype=99&degreefrom=99&jobterm=99"
+    "&companysize=99&providesalary=99&lonlat=0%2C0&radius=-1&ord_field=0&confirmdate=9"
+    "&fromType=&dibiaoid=0&address=&line=&specialarea=00&from=&welfare="
 )
 
-LOG_LEVEL = logging.INFO    # 日志等级
+LOG_LEVEL = logging.INFO  # 日志等级
 POOL_MAXSIZE = 8  # 线程池最大容量
 
 logger = get_logger()
@@ -64,7 +77,7 @@ class JobSpider:
 
     def __init__(self):
         self.count = 1  # 记录当前爬第几条数据
-        self.company = []
+        self.company = []  # 爬取的数据结构
         self.desc_url_queue = Queue()  # 线程池队列
         self.pool = Pool(POOL_MAXSIZE)  # 线程池管理线程,最大协程数
 
@@ -72,25 +85,34 @@ class JobSpider:
         """
         爬虫入口
         """
-        urls = [START_URL.format(p) for p in range(1, 16)]
+        hrefs = []
+        urls = [START_URL.format(p) for p in range(1, 11)]
         for url in urls:
             logger.info("爬取第 {} 页".format(urls.index(url) + 1))
-            html = requests.get(url, headers=HEADERS).content.decode("gbk")
+            html = requests.get(url, headers=HEADERS).content
+            html = html.decode("gbk")
             bs = BeautifulSoup(html, "lxml").find("div", class_="dw_table").find_all(
                 "div", class_="el"
             )
             for b in bs:
                 try:
-                    href, post = b.find("a")["href"], b.find("a")["title"]
+                    href = b.find("a")["href"]
+                    post = b.find("a")["title"]
+                    company = b.find("span", class_="t2").find("a")["title"]
                     locate = b.find("span", class_="t3").text
                     salary = b.find("span", class_="t4").text
                     item = {
-                        "href": href, "post": post, "locate": locate, "salary": salary
+                        "href": href, "post": post, "company": company, "locate": locate, "salary": salary
                     }
-                    self.desc_url_queue.put(href)  # 岗位详情链接加入队列
+
+                    hrefs.append(href)  # cache href
                     self.company.append(item)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(e)
+        # url 去重
+        for h in set(hrefs):
+            self.desc_url_queue.put(h)  # 岗位详情链接加入队列
+
         # 打印队列长度,即多少条岗位详情 url
         logger.info("队列长度为 {} ".format(self.desc_url_queue.qsize()))
 
@@ -109,6 +131,7 @@ class JobSpider:
                 self.count += 1
             else:
                 self.desc_url_queue.put(url)
+                logger.warning("[" + resp.status_code + "]" + url)
                 continue
             try:
                 bs = BeautifulSoup(html, "lxml").find(
@@ -118,7 +141,7 @@ class JobSpider:
                     "\t", ""
                 ).strip()
                 with open(
-                    os.path.join("data", "post_require_new.txt"), "a", encoding="utf-8"
+                        os.path.join("data", "post_require_new.txt"), "a", encoding="utf-8"
                 ) as f:
                     f.write(s)
             except Exception as e:
@@ -144,11 +167,11 @@ class JobSpider:
         seg_list = jieba.cut(post, cut_all=False)
         counter = dict()
         for seg in seg_list:
-            counter[seg] = counter.get(seg, 1) + 1
+            counter[seg] = counter.get(seg, 0) + 1
         counter_sort = sorted(counter.items(), key=lambda value: value[1], reverse=True)
         pprint(counter_sort)
         with open(
-            os.path.join("data", "post_pre_desc_counter.csv"), "w+", encoding="utf-8"
+                os.path.join("data", "post_pre_desc_counter.csv"), "w+", encoding="utf-8"
         ) as f:
             f_csv = csv.writer(f)
             f_csv.writerows(counter_sort)
@@ -162,7 +185,7 @@ class JobSpider:
         counter_most = counter.most_common()
         pprint(counter_most)
         with open(
-            os.path.join("data", "post_pre_counter.csv"), "w+", encoding="utf-8"
+                os.path.join("data", "post_pre_counter.csv"), "w+", encoding="utf-8"
         ) as f:
             f_csv = csv.writer(f)
             f_csv.writerows(counter_most)
@@ -173,10 +196,10 @@ class JobSpider:
         """
         lst = []
         for c in self.company:
-            lst.append((c.get("salary"), c.get("post"), c.get("locate")))
+            lst.append((c.get("salary"), c.get("post"), c.get("locate"), c.get("href"), c.get("company")))
         pprint(lst)
         with open(
-            os.path.join("data", "post_salary_locate.csv"), "w+", encoding="utf-8"
+                os.path.join("data", "post_salary_locate.csv"), "w+", encoding="utf-8"
         ) as f:
             f_csv = csv.writer(f)
             f_csv.writerows(lst)
@@ -190,23 +213,25 @@ class JobSpider:
         year = []
         thousand = []
         with open(
-            os.path.join("data", "post_salary_locate.csv"), "r", encoding="utf-8"
+                os.path.join("data", "post_salary_locate.csv"), "r", encoding="utf-8"
         ) as f:
             f_csv = csv.reader(f)
             for row in f_csv:
+                if len(row) < 5:
+                    continue
                 if "万/月" in row[0]:
-                    mouth.append((row[0][:-3], row[2], row[1]))
+                    mouth.append((row[0][:-3], row[2], row[1], row[3], row[4]))
                 elif "万/年" in row[0]:
-                    year.append((row[0][:-3], row[2], row[1]))
+                    year.append((row[0][:-3], row[2], row[1], row[3], row[4]))
                 elif "千/月" in row[0]:
-                    thousand.append((row[0][:-3], row[2], row[1]))
+                    thousand.append((row[0][:-3], row[2], row[1], row[3], row[4]))
         pprint(mouth)
 
         calc = []
         for m in mouth:
             s = m[0].split("-")
             calc.append(
-                (round((float(s[1]) - float(s[0])) * 0.4 + float(s[0]), 1), m[1], m[2])
+                (round((float(s[1]) - float(s[0])) * 0.4 + float(s[0]), 1), m[1], m[2], m[3], m[4])
             )
         for y in year:
             s = y[0].split("-")
@@ -215,6 +240,8 @@ class JobSpider:
                     round(((float(s[1]) - float(s[0])) * 0.4 + float(s[0])) / 12, 1),
                     y[1],
                     y[2],
+                    y[3],
+                    y[4]
                 )
             )
         for t in thousand:
@@ -224,6 +251,8 @@ class JobSpider:
                     round(((float(s[1]) - float(s[0])) * 0.4 + float(s[0])) / 10, 1),
                     t[1],
                     t[2],
+                    t[3],
+                    t[4]
                 )
             )
         pprint(calc)
@@ -238,11 +267,17 @@ class JobSpider:
         """
         with open(os.path.join("data", "post_salary.csv"), "r", encoding="utf-8") as f:
             f_csv = csv.reader(f)
-            lst = [row[0] for row in f_csv]
+            # lst = [row[0] for row in f_csv]
+            lst = []
+            for row in f_csv:
+                if len(row) < 1:
+                    continue
+                lst.append(row[0])
+
         counter = Counter(lst).most_common()
         pprint(counter)
         with open(
-            os.path.join("data", "post_salary_counter1.csv"), "w+", encoding="utf-8"
+                os.path.join("data", "post_salary_counter1.csv"), "w+", encoding="utf-8"
         ) as f:
             f_csv = csv.writer(f)
             f_csv.writerows(counter)
@@ -254,15 +289,17 @@ class JobSpider:
         """
         counter = {}
         with open(
-            os.path.join("data", "post_pre_desc_counter.csv"), "r", encoding="utf-8"
+                os.path.join("data", "post_pre_desc_counter.csv"), "r", encoding="utf-8"
         ) as f:
             f_csv = csv.reader(f)
             for row in f_csv:
+                if len(row) < 2:
+                    continue
                 counter[row[0]] = counter.get(row[0], int(row[1]))
             pprint(counter)
         file_path = os.path.join("font", "msyh.ttf")
         wc = WordCloud(
-            font_path=file_path, max_words=100, height=600, width=1200
+            font_path=file_path, max_words=100, height=1080, width=1920
         ).generate_from_frequencies(
             counter
         )
@@ -279,23 +316,28 @@ class JobSpider:
         create table jobpost(
             j_salary float(3, 1),
             j_locate text,
-            j_post text
+            j_post text,
+            j_href text,
+            j_company text
         );
         """
+
         conn = pymysql.connect(
             host="localhost",
             port=3306,
             user="root",
-            passwd="0303",
-            db="chenx",
-            charset="utf8",
+            passwd="123456",
+            db="51job",
+            charset="utf8"
         )
         cur = conn.cursor()
         with open(os.path.join("data", "post_salary.csv"), "r", encoding="utf-8") as f:
             f_csv = csv.reader(f)
-            sql = "insert into jobpost(j_salary, j_locate, j_post) values(%s, %s, %s)"
+            sql = "insert into jobpost(j_salary, j_locate, j_post, j_href, j_company) values(%s, %s, %s, %s, %s)"
             for row in f_csv:
-                value = (row[0], row[1], row[2])
+                if len(row) < 5:
+                    continue
+                value = (row[0], row[1], row[2], row[3], row[4])
                 try:
                     cur.execute(sql, value)
                     conn.commit()
@@ -330,9 +372,12 @@ if __name__ == "__main__":
     logger.info("总耗时 {} 秒".format(time.time() - start))
 
     # 按需启动
-    # spider.post_salary_locate()
-    # spider.post_salary()
-    # spider.insert_into_db()
-    # spider.post_salary_counter()
-    # spider.post_counter()
+    spider.post_salary_locate()
+    spider.post_salary()
+    spider.insert_into_db()
+    spider.post_salary_counter()
+    spider.post_counter()
+    spider.post_desc_counter()
+
+    # # 生成词云
     # spider.world_cloud()
